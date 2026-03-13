@@ -2,7 +2,7 @@
 
 > Simple audio & MIDI recorder for desktop — built with Tauri 2, Rust, and React.
 
-![App Preview](preview.png)
+![App Preview](assets/preview.gif)
 
 ## Features
 
