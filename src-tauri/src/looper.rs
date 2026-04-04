@@ -16,6 +16,7 @@ pub enum LooperStatus {
     /// Overdub requested; spinning until the next loop boundary.
     WaitingForOverdub,
     Looping,
+    Paused,
     Overdubbing,
 }
 
@@ -84,6 +85,8 @@ pub struct LooperEngine {
     /// True while the input callback should accumulate into recording_buf.
     #[allow(dead_code)]
     pub is_recording: Arc<AtomicBool>,
+    /// When true, output callback emits silence and freezes playback_pos.
+    pub is_paused: Arc<AtomicBool>,
     pub cmd_tx: std::sync::mpsc::SyncSender<LooperCmd>,
     pub thread_join: Option<std::thread::JoinHandle<()>>,
 }
@@ -105,6 +108,7 @@ pub fn start_looper_thread(
     let shared = Arc::new(Mutex::new(LooperShared::new()));
     let playback_pos = Arc::new(AtomicUsize::new(0));
     let is_recording = Arc::new(AtomicBool::new(true)); // RecordingBase starts immediately
+    let is_paused = Arc::new(AtomicBool::new(false));
 
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(0);
     let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel::<LooperCmd>(8);
@@ -112,6 +116,7 @@ pub fn start_looper_thread(
     let shared_t = Arc::clone(&shared);
     let pos_t = Arc::clone(&playback_pos);
     let rec_t = Arc::clone(&is_recording);
+    let pause_t = Arc::clone(&is_paused);
 
     let join = std::thread::spawn(move || {
         looper_thread_main(
@@ -121,6 +126,7 @@ pub fn start_looper_thread(
             shared_t,
             pos_t,
             rec_t,
+            pause_t,
             ready_tx,
             cmd_rx,
         );
@@ -131,6 +137,7 @@ pub fn start_looper_thread(
             shared,
             playback_pos,
             is_recording,
+            is_paused,
             cmd_tx,
             thread_join: Some(join),
         }),
@@ -151,6 +158,7 @@ fn looper_thread_main(
     shared: Arc<Mutex<LooperShared>>,
     playback_pos: Arc<AtomicUsize>,
     is_recording: Arc<AtomicBool>,
+    is_paused: Arc<AtomicBool>,
     ready_tx: std::sync::mpsc::SyncSender<Result<(), String>>,
     cmd_rx: std::sync::mpsc::Receiver<LooperCmd>,
 ) {
@@ -284,6 +292,7 @@ fn looper_thread_main(
         let out_channels = out_cfg.channels() as usize;
         let shared_out = Arc::clone(&shared);
         let pos_out = Arc::clone(&playback_pos);
+        let paused_out = Arc::clone(&is_paused);
 
         // Always use the input device's sample rate for output so that
         // playback_pos advances at the same rate the audio was recorded.
@@ -322,7 +331,7 @@ fn looper_thread_main(
             cpal::SampleFormat::F32 => out_device.build_output_stream(
                 &stream_cfg,
                 move |data: &mut [f32], _| {
-                    mix_into_output(data, &shared_out, &pos_out, out_channels);
+                    mix_into_output(data, &shared_out, &pos_out, &paused_out, out_channels);
                 },
                 |e| eprintln!("[Looper] output error: {e}"),
                 None,
@@ -330,11 +339,12 @@ fn looper_thread_main(
             cpal::SampleFormat::I16 => {
                 let shared_out2 = Arc::clone(&shared);
                 let pos_out2 = Arc::clone(&playback_pos);
+                let paused_out2 = Arc::clone(&is_paused);
                 out_device.build_output_stream(
                     &stream_cfg,
                     move |data: &mut [i16], _| {
                         let mut tmp = vec![0.0f32; data.len()];
-                        mix_into_output(&mut tmp, &shared_out2, &pos_out2, out_channels);
+                        mix_into_output(&mut tmp, &shared_out2, &pos_out2, &paused_out2, out_channels);
                         for (o, s) in data.iter_mut().zip(tmp.iter()) {
                             *o = (s * 32767.0) as i16;
                         }
@@ -480,8 +490,14 @@ fn mix_into_output(
     data: &mut [f32],
     shared: &Arc<Mutex<LooperShared>>,
     playback_pos: &Arc<AtomicUsize>,
+    is_paused: &Arc<AtomicBool>,
     out_channels: usize,
 ) {
+    if is_paused.load(Ordering::Relaxed) {
+        data.fill(0.0);
+        return;
+    }
+
     let g = match shared.try_lock() {
         Ok(g) => g,
         Err(_) => { data.fill(0.0); return; }

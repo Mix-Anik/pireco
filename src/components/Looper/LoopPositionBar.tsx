@@ -7,7 +7,7 @@ interface Props {
 }
 
 export function LoopPositionBar({ posMs, durationMs, status }: Props) {
-  if (status !== 'Looping' && status !== 'WaitingForOverdub' && status !== 'Overdubbing') return null;
+  if (status !== 'Looping' && status !== 'Paused' && status !== 'WaitingForOverdub' && status !== 'Overdubbing') return null;
   if (durationMs === 0) return null;
 
   const pct = Math.min((posMs / durationMs) * 100, 100);

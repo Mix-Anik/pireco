@@ -43,6 +43,8 @@ export function LooperPage({ looper }: Props) {
           onStartOverdub={looper.startOverdub}
           onStopOverdub={looper.stopOverdub}
           onStopAll={looper.stopAll}
+          onPause={looper.pause}
+          onResume={looper.resume}
         />
       </aside>
 

@@ -198,6 +198,28 @@ pub fn looper_delete_layer(
     Ok(build_snapshot(&state))
 }
 
+/// Pause loop playback (output goes silent, position freezes).
+#[tauri::command]
+pub fn looper_pause(state: State<'_, AppState>) -> Result<LooperStateSnapshot, String> {
+    let guard = state.looper.lock().unwrap();
+    let engine = guard.as_ref().ok_or("Looper is not running")?;
+    engine.is_paused.store(true, std::sync::atomic::Ordering::SeqCst);
+    engine.shared.lock().unwrap().status = crate::looper::LooperStatus::Paused;
+    drop(guard);
+    Ok(build_snapshot(&state))
+}
+
+/// Resume loop playback from the position it was paused at.
+#[tauri::command]
+pub fn looper_resume(state: State<'_, AppState>) -> Result<LooperStateSnapshot, String> {
+    let guard = state.looper.lock().unwrap();
+    let engine = guard.as_ref().ok_or("Looper is not running")?;
+    engine.shared.lock().unwrap().status = crate::looper::LooperStatus::Looping;
+    engine.is_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+    drop(guard);
+    Ok(build_snapshot(&state))
+}
+
 /// Read-only state snapshot — called by the frontend polling interval.
 #[tauri::command]
 pub fn looper_get_state(state: State<'_, AppState>) -> LooperStateSnapshot {

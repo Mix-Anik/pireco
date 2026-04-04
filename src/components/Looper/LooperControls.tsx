@@ -10,6 +10,8 @@ interface Props {
   onStartOverdub: () => void;
   onStopOverdub: () => void;
   onStopAll: () => void;
+  onPause: () => void;
+  onResume: () => void;
 }
 
 export function LooperControls({
@@ -21,10 +23,13 @@ export function LooperControls({
   onStartOverdub,
   onStopOverdub,
   onStopAll,
+  onPause,
+  onResume,
 }: Props) {
   const isIdle = status === 'Idle';
   const isRecordingBase = status === 'RecordingBase';
   const isLooping = status === 'Looping';
+  const isPaused = status === 'Paused';
   const isWaiting = status === 'WaitingForOverdub';
   const isOverdubbing = status === 'Overdubbing';
   const isActive = !isIdle;
@@ -77,6 +82,28 @@ export function LooperControls({
           >
             <span className="transport-btn-icon">⟳</span>
             Set Loop
+          </button>
+        )}
+
+        {/* Pause / Resume */}
+        {isLooping && (
+          <button
+            className="transport-btn"
+            onClick={onPause}
+            title="Pause loop playback"
+          >
+            <span className="transport-btn-icon">⏸</span>
+            Pause
+          </button>
+        )}
+        {isPaused && (
+          <button
+            className="transport-btn play"
+            onClick={onResume}
+            title="Resume loop playback"
+          >
+            <span className="transport-btn-icon">▶</span>
+            Resume
           </button>
         )}
 

@@ -241,6 +241,24 @@ export function useLooperState() {
     }
   }, []);
 
+  const pause = useCallback(async () => {
+    try {
+      const snapshot = await invoke<LooperStateSnapshot>('looper_pause');
+      dispatch({ type: 'SNAPSHOT', snapshot });
+    } catch (err) {
+      dispatch({ type: 'SET_ERROR', error: String(err) });
+    }
+  }, []);
+
+  const resume = useCallback(async () => {
+    try {
+      const snapshot = await invoke<LooperStateSnapshot>('looper_resume');
+      dispatch({ type: 'SNAPSHOT', snapshot });
+    } catch (err) {
+      dispatch({ type: 'SET_ERROR', error: String(err) });
+    }
+  }, []);
+
   const clearError = useCallback(() => {
     dispatch({ type: 'CLEAR_ERROR' });
   }, []);
@@ -255,6 +273,8 @@ export function useLooperState() {
     startOverdub,
     stopOverdub,
     stopAll,
+    pause,
+    resume,
     toggleMute,
     deleteLayer,
     clearError,
