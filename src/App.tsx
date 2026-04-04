@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import './styles/globals.css';
 
 import { useAppState }      from './hooks/useAppState';
+import { useLooperState }   from './hooks/useLooperState';
 import { useTauriEvents }   from './hooks/useTauriEvents';
 import { useAudioPlayback } from './hooks/useAudioPlayback';
 import { useWaveformData }  from './hooks/useWaveformData';
 
 import { StatusBar }           from './components/StatusBar';
+import { TabBar }              from './components/TabBar';
 import { AudioDeviceSelector } from './components/DevicePanel/AudioDeviceSelector';
 import { MidiDeviceSelector }  from './components/DevicePanel/MidiDeviceSelector';
 import { TransportControls }   from './components/Transport/TransportControls';
@@ -14,9 +16,14 @@ import { LiveWaveform }        from './components/Visualization/LiveWaveform';
 import { LevelMeter }          from './components/Visualization/LevelMeter';
 import { PlaybackWaveform }    from './components/Visualization/PlaybackWaveform';
 import { MidiKeyboard }        from './components/Visualization/MidiKeyboard';
+import { LooperPage }          from './components/Looper/LooperPage';
 import { formatDuration }      from './utils/waveformUtils';
+import type { AppTab }         from './types';
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<AppTab>('recorder');
+  const looper = useLooperState();
+
   const { state, setAudioDevice, setMidiDevice, record, stop, save, reset, clearError } = useAppState();
   const { audioLevel, activeNotes } = useTauriEvents();
   const waveformData = useWaveformData(state.status);
@@ -40,9 +47,10 @@ export default function App() {
     return () => clearInterval(timerRef.current);
   }, [state.status]);
 
-  // Space bar: toggle record / stop
+  // Space bar: toggle record / stop (recorder tab only)
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (activeTab !== 'recorder') return;
       if (e.code !== 'Space') return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -52,9 +60,9 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [state.status, record, stop]);
+  }, [activeTab, state.status, record, stop]);
 
-  // Auto-dismiss error after 6 seconds
+  // Auto-dismiss recorder error after 6 seconds
   useEffect(() => {
     if (!state.error) return;
     const t = setTimeout(clearError, 6000);
@@ -84,77 +92,89 @@ export default function App() {
         isSaving={state.isSaving}
       />
 
-      <aside className="sidebar">
-        <AudioDeviceSelector
-          selectedId={state.selectedAudioDevice}
-          onChange={setAudioDevice}
-          disabled={devicesBusy}
-        />
-        <MidiDeviceSelector
-          selectedId={state.selectedMidiDevice}
-          onChange={setMidiDevice}
-          disabled={devicesBusy}
-        />
-        <TransportControls
-          status={state.status}
-          isPlaying={playback.isPlaying}
-          isSaving={state.isSaving}
-          hasMidi={hasMidi}
-          onRecord={record}
-          onStop={stop}
-          onPlayPause={handlePlayPause}
-          onSave={save}
-          onReset={handleReset}
-        />
-      </aside>
+      <TabBar
+        activeTab={activeTab}
+        onChange={setActiveTab}
+        looperStatus={looper.state.status}
+      />
 
-      <main className="main">
-        <div className="viz-panel">
-          {state.status === 'Idle' && (
-            <div className="idle-placeholder">
-              <div className="idle-icon">⏺</div>
-              <div className="idle-text">Select devices and press Record to begin</div>
+      {activeTab === 'recorder' ? (
+        <>
+          <aside className="sidebar">
+            <AudioDeviceSelector
+              selectedId={state.selectedAudioDevice}
+              onChange={setAudioDevice}
+              disabled={devicesBusy}
+            />
+            <MidiDeviceSelector
+              selectedId={state.selectedMidiDevice}
+              onChange={setMidiDevice}
+              disabled={devicesBusy}
+            />
+            <TransportControls
+              status={state.status}
+              isPlaying={playback.isPlaying}
+              isSaving={state.isSaving}
+              hasMidi={hasMidi}
+              onRecord={record}
+              onStop={stop}
+              onPlayPause={handlePlayPause}
+              onSave={save}
+              onReset={handleReset}
+            />
+          </aside>
+
+          <main className="main">
+            <div className="viz-panel">
+              {state.status === 'Idle' && (
+                <div className="idle-placeholder">
+                  <div className="idle-icon">⏺</div>
+                  <div className="idle-text">Select devices and press Record to begin</div>
+                </div>
+              )}
+
+              {state.status === 'Recording' && (
+                <div className="live-viz">
+                  <div className="viz-row-label">Live Input</div>
+                  <LiveWaveform audioLevel={audioLevel} />
+                  <LevelMeter audioLevel={audioLevel} />
+                  <MidiKeyboard activeNotes={activeNotes} />
+                </div>
+              )}
+
+              {state.status === 'Stopped' && (
+                <div className="playback-viz">
+                  <div className="viz-row-label">
+                    Recording — {formatDuration(stoppedMs / 1000)}
+                    {hasMidi && (
+                      <span style={{ marginLeft: 8, color: 'var(--accent-dim)' }}>+ MIDI</span>
+                    )}
+                  </div>
+                  <PlaybackWaveform waveformData={waveformData} playback={playback} />
+                  <div className="playback-controls">
+                    <span className="playback-time">
+                      {formatDuration(playback.currentTime)} / {formatDuration(playback.duration)}
+                    </span>
+                    <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
+                      Click waveform to seek
+                    </span>
+                  </div>
+                  <MidiKeyboard activeNotes={activeNotes} />
+                </div>
+              )}
             </div>
-          )}
 
-          {state.status === 'Recording' && (
-            <div className="live-viz">
-              <div className="viz-row-label">Live Input</div>
-              <LiveWaveform audioLevel={audioLevel} />
-              <LevelMeter audioLevel={audioLevel} />
-              <MidiKeyboard activeNotes={activeNotes} />
-            </div>
-          )}
-
-          {state.status === 'Stopped' && (
-            <div className="playback-viz">
-              <div className="viz-row-label">
-                Recording — {formatDuration(stoppedMs / 1000)}
-                {hasMidi && (
-                  <span style={{ marginLeft: 8, color: 'var(--accent-dim)' }}>+ MIDI</span>
-                )}
+            {state.error && (
+              <div className="error-toast">
+                <span style={{ flex: 1 }}>{state.error}</span>
+                <button className="error-close" onClick={clearError}>✕</button>
               </div>
-              <PlaybackWaveform waveformData={waveformData} playback={playback} />
-              <div className="playback-controls">
-                <span className="playback-time">
-                  {formatDuration(playback.currentTime)} / {formatDuration(playback.duration)}
-                </span>
-                <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>
-                  Click waveform to seek
-                </span>
-              </div>
-              <MidiKeyboard activeNotes={activeNotes} />
-            </div>
-          )}
-        </div>
-
-        {state.error && (
-          <div className="error-toast">
-            <span style={{ flex: 1 }}>{state.error}</span>
-            <button className="error-close" onClick={clearError}>✕</button>
-          </div>
-        )}
-      </main>
+            )}
+          </main>
+        </>
+      ) : (
+        <LooperPage looper={looper} />
+      )}
     </div>
   );
 }

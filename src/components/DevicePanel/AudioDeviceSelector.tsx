@@ -6,9 +6,10 @@ interface Props {
   selectedId: number | null;
   onChange: (id: number) => void;
   disabled: boolean;
+  storageKey?: string;
 }
 
-export function AudioDeviceSelector({ selectedId, onChange, disabled }: Props) {
+export function AudioDeviceSelector({ selectedId, onChange, disabled, storageKey = 'pireco_audio_device' }: Props) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -18,7 +19,7 @@ export function AudioDeviceSelector({ selectedId, onChange, disabled }: Props) {
       const list = await invoke<AudioDevice[]>('get_audio_devices');
       setDevices(list);
       if (selectedId === null) {
-        const savedName = localStorage.getItem('pireco_audio_device');
+        const savedName = localStorage.getItem(storageKey);
         const saved = savedName ? list.find((d) => d.name === savedName) : null;
         const def = saved ?? list.find((d) => d.is_default) ?? list[0];
         if (def) onChange(def.id);
@@ -42,7 +43,7 @@ export function AudioDeviceSelector({ selectedId, onChange, disabled }: Props) {
           onChange={(e) => {
             const id = Number(e.target.value);
             const name = devices.find((d) => d.id === id)?.name;
-            if (name) localStorage.setItem('pireco_audio_device', name);
+            if (name) localStorage.setItem(storageKey, name);
             onChange(id);
           }}
           disabled={disabled || loading}

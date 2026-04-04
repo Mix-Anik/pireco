@@ -32,3 +32,30 @@ export interface SaveResult {
   saved_wav: boolean;
   saved_midi: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Looper types
+// ---------------------------------------------------------------------------
+
+export type LooperStatus = 'Idle' | 'RecordingBase' | 'WaitingForOverdub' | 'Looping' | 'Overdubbing';
+
+export interface LayerSnapshot {
+  id: number;
+  muted: boolean;
+  duration_ms: number;
+}
+
+export interface LooperStateSnapshot {
+  status: LooperStatus;
+  layers: LayerSnapshot[];
+  loop_duration_ms: number;
+  playback_pos_ms: number;
+  sample_rate: number;
+}
+
+export interface AudioOutputDevice {
+  id: number;
+  name: string;
+}
+
+export type AppTab = 'recorder' | 'looper';

@@ -21,7 +21,7 @@ export function TransportControls({
 
   return (
     <div className="sidebar-section" style={{ gap: 0 }}>
-      <div className="section-label">Transport</div>
+      <div className="section-label">Actions</div>
       <div className="transport">
 
         <button

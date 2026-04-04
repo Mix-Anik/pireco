@@ -55,12 +55,14 @@ impl RecordingSession {
 
 pub struct AppState {
     pub session: Mutex<RecordingSession>,
+    pub looper: Mutex<Option<crate::looper::LooperEngine>>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         AppState {
             session: Mutex::new(RecordingSession::new()),
+            looper: Mutex::new(None),
         }
     }
 }
