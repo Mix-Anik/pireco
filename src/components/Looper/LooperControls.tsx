@@ -33,6 +33,7 @@ export function LooperControls({
   onStopAndSaveSession,
 }: Props) {
   const isIdle = status === 'Idle';
+  const isArming = status === 'Arming';
   const isRecordingBase = status === 'RecordingBase';
   const isLooping = status === 'Looping';
   const isPaused = status === 'Paused';
@@ -78,6 +79,14 @@ export function LooperControls({
           <span className="transport-btn-icon">⏺</span>
           Record Loop
         </button>
+
+        {/* Armed: waiting for first sound */}
+        {isArming && (
+          <div className="arming-indicator">
+            <span className="arming-dot" />
+            Waiting for sound…
+          </div>
+        )}
 
         {/* Stop base recording → start looping */}
         {isRecordingBase && (

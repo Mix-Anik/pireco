@@ -40,9 +40,12 @@ function LayerRow({ layer, index, loopDurationMs, onToggleMute, onDelete }: Laye
       ? 'rgba(0,212,200,0.2)'
       : 'rgba(0,212,200,0.8)';
 
+    // Normalize to the local peak so quiet recordings still look full.
+    const peak = Math.max(...waveform, 0.001);
+
     ctx.fillStyle = color;
     waveform.forEach((amp, i) => {
-      const barH = Math.max(1, amp * h * 0.9);
+      const barH = Math.max(1, (amp / peak) * h * 0.9);
       ctx.fillRect(i * barW, mid - barH / 2, Math.max(1, barW - 0.5), barH);
     });
   }, [waveform, layer.muted]);

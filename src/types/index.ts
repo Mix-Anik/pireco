@@ -37,7 +37,7 @@ export interface SaveResult {
 // Looper types
 // ---------------------------------------------------------------------------
 
-export type LooperStatus = 'Idle' | 'RecordingBase' | 'WaitingForOverdub' | 'Looping' | 'Paused' | 'Overdubbing';
+export type LooperStatus = 'Idle' | 'Arming' | 'RecordingBase' | 'WaitingForOverdub' | 'Looping' | 'Paused' | 'Overdubbing';
 
 export interface LayerSnapshot {
   id: number;

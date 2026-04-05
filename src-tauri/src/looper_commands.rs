@@ -49,7 +49,7 @@ fn build_snapshot(state: &State<'_, AppState>) -> LooperStateSnapshot {
             is_session_recording: false,
         },
         Some(engine) => {
-            let shared = engine.shared.lock().unwrap();
+            let shared = engine.shared.read().unwrap();
             let pos_frames = engine.playback_pos.load(std::sync::atomic::Ordering::Relaxed);
             let sr = shared.sample_rate.max(1) as u64;
             let loop_ms = (shared.loop_length_frames as u64 * 1000 / sr) as u32;
@@ -69,7 +69,7 @@ fn build_snapshot(state: &State<'_, AppState>) -> LooperStateSnapshot {
                 loop_duration_ms: loop_ms,
                 playback_pos_ms: pos_ms,
                 sample_rate: shared.sample_rate,
-                is_session_recording: shared.is_session_recording,
+                is_session_recording: engine.is_session_recording.load(std::sync::atomic::Ordering::Relaxed),
             }
         }
     }
@@ -98,7 +98,7 @@ pub fn looper_start_record(
     {
         let mut guard = state.looper.lock().unwrap();
         if let Some(engine) = guard.as_ref() {
-            let is_idle = engine.shared.lock().unwrap().status == LooperStatus::Idle;
+            let is_idle = engine.shared.read().unwrap().status == LooperStatus::Idle;
             if !is_idle {
                 return Err("A looper session is already running. Stop it first.".into());
             }
@@ -173,7 +173,7 @@ pub fn looper_toggle_mute_layer(
 ) -> Result<LooperStateSnapshot, String> {
     let guard = state.looper.lock().unwrap();
     let engine = guard.as_ref().ok_or("Looper is not running")?;
-    let mut shared = engine.shared.lock().unwrap();
+    let mut shared = engine.shared.write().unwrap();
     if let Some(layer) = shared.layers.iter_mut().find(|l| l.id == layer_id) {
         layer.muted = !layer.muted;
     }
@@ -190,7 +190,7 @@ pub fn looper_delete_layer(
 ) -> Result<LooperStateSnapshot, String> {
     let guard = state.looper.lock().unwrap();
     let engine = guard.as_ref().ok_or("Looper is not running")?;
-    let mut shared = engine.shared.lock().unwrap();
+    let mut shared = engine.shared.write().unwrap();
     shared.layers.retain(|l| l.id != layer_id);
     if shared.layers.is_empty() {
         shared.loop_length_frames = 0;
@@ -208,7 +208,7 @@ pub fn looper_pause(state: State<'_, AppState>) -> Result<LooperStateSnapshot, S
     let guard = state.looper.lock().unwrap();
     let engine = guard.as_ref().ok_or("Looper is not running")?;
     engine.is_paused.store(true, std::sync::atomic::Ordering::SeqCst);
-    engine.shared.lock().unwrap().status = crate::looper::LooperStatus::Paused;
+    engine.shared.write().unwrap().status = crate::looper::LooperStatus::Paused;
     drop(guard);
     Ok(build_snapshot(&state))
 }
@@ -218,7 +218,7 @@ pub fn looper_pause(state: State<'_, AppState>) -> Result<LooperStateSnapshot, S
 pub fn looper_resume(state: State<'_, AppState>) -> Result<LooperStateSnapshot, String> {
     let guard = state.looper.lock().unwrap();
     let engine = guard.as_ref().ok_or("Looper is not running")?;
-    engine.shared.lock().unwrap().status = crate::looper::LooperStatus::Looping;
+    engine.shared.write().unwrap().status = crate::looper::LooperStatus::Looping;
     engine.is_paused.store(false, std::sync::atomic::Ordering::SeqCst);
     drop(guard);
     Ok(build_snapshot(&state))
@@ -229,11 +229,9 @@ pub fn looper_resume(state: State<'_, AppState>) -> Result<LooperStateSnapshot, 
 pub fn looper_start_session_record(state: State<'_, AppState>) -> Result<LooperStateSnapshot, String> {
     let guard = state.looper.lock().unwrap();
     let engine = guard.as_ref().ok_or("Looper is not running")?;
-    let mut shared = engine.shared.lock().unwrap();
-    shared.session_recording_buf.clear();
-    shared.session_input_buf.clear();
-    shared.is_session_recording = true;
-    drop(shared);
+    engine.session_mix_buf.lock().unwrap().clear();
+    engine.session_input_buf.lock().unwrap().clear();
+    engine.is_session_recording.store(true, std::sync::atomic::Ordering::SeqCst);
     drop(guard);
     Ok(build_snapshot(&state))
 }
@@ -247,14 +245,11 @@ pub fn looper_stop_session_record(
     let (mix_buf, input_buf, channels, sample_rate) = {
         let guard = state.looper.lock().unwrap();
         let engine = guard.as_ref().ok_or("Looper is not running")?;
-        let mut shared = engine.shared.lock().unwrap();
-        shared.is_session_recording = false;
-        (
-            std::mem::take(&mut shared.session_recording_buf),
-            std::mem::take(&mut shared.session_input_buf),
-            shared.channels,
-            shared.sample_rate,
-        )
+        engine.is_session_recording.store(false, std::sync::atomic::Ordering::SeqCst);
+        let mix_buf = std::mem::take(&mut *engine.session_mix_buf.lock().unwrap());
+        let input_buf = std::mem::take(&mut *engine.session_input_buf.lock().unwrap());
+        let shared = engine.shared.read().unwrap();
+        (mix_buf, input_buf, shared.channels, shared.sample_rate)
     };
 
     // Mix loop output + live input sample by sample; use shorter length to stay aligned.
@@ -331,7 +326,7 @@ pub fn looper_get_layer_waveform(
 ) -> Result<Vec<f32>, String> {
     let guard = state.looper.lock().unwrap();
     let engine = guard.as_ref().ok_or("Looper is not running")?;
-    let shared = engine.shared.lock().unwrap();
+    let shared = engine.shared.read().unwrap();
     let layer = shared
         .layers
         .iter()

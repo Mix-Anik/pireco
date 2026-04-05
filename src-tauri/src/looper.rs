@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc, Mutex,
+    Arc, Mutex, RwLock,
 };
 use tauri::{AppHandle, Emitter};
 
@@ -12,6 +12,8 @@ use tauri::{AppHandle, Emitter};
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum LooperStatus {
     Idle,
+    /// Engine is armed: waiting for the first sound above threshold before recording.
+    Arming,
     RecordingBase,
     /// Overdub requested; spinning until the next loop boundary.
     WaitingForOverdub,
@@ -27,9 +29,12 @@ pub struct LoopLayer {
     pub muted: bool,
 }
 
-/// Single source of truth for all looper state.
-/// Shared between the looper thread (cmd loop + audio callbacks) and Tauri command handlers.
-/// Audio callbacks use `try_lock` — a failed lock produces one silent frame at worst.
+/// Playback / recording state shared between the looper thread and Tauri command handlers.
+///
+/// Uses RwLock so multiple output callbacks can hold read locks simultaneously
+/// (they never contend with each other), while command handlers briefly take
+/// exclusive write locks.  Audio callbacks use `try_read` / `try_write` — a
+/// failed attempt produces one silent frame at worst.
 pub struct LooperShared {
     pub layers: Vec<LoopLayer>,
     /// Set once when the base loop is finalised; immutable afterwards.
@@ -40,13 +45,6 @@ pub struct LooperShared {
     /// Accumulates raw f32 samples during RecordingBase / Overdubbing.
     pub recording_buf: Vec<f32>,
     pub status: LooperStatus,
-    /// When true, the output callback appends the loop mix to session_recording_buf
-    /// and the input callback appends live audio to session_input_buf.
-    pub is_session_recording: bool,
-    /// Loop mix samples captured during a session recording (interleaved f32).
-    pub session_recording_buf: Vec<f32>,
-    /// Live input samples captured during a session recording (interleaved f32).
-    pub session_input_buf: Vec<f32>,
 }
 
 impl LooperShared {
@@ -58,10 +56,7 @@ impl LooperShared {
             channels: 0,
             next_layer_id: 0,
             recording_buf: Vec::new(),
-            status: LooperStatus::RecordingBase,
-            is_session_recording: false,
-            session_recording_buf: Vec::new(),
-            session_input_buf: Vec::new(),
+            status: LooperStatus::Arming,
         }
     }
 }
@@ -82,14 +77,24 @@ pub enum LooperCmd {
 
 /// Stored in AppState; gives Tauri commands access to shared state and the cmd channel.
 pub struct LooperEngine {
-    pub shared: Arc<Mutex<LooperShared>>,
+    pub shared: Arc<RwLock<LooperShared>>,
     /// Frame position in the current loop; atomically updated by the output callback.
     pub playback_pos: Arc<AtomicUsize>,
     /// True while the input callback should accumulate into recording_buf.
     #[allow(dead_code)]
     pub is_recording: Arc<AtomicBool>,
+    /// True while waiting for the first sound above threshold before recording.
+    #[allow(dead_code)]
+    pub is_arming: Arc<AtomicBool>,
     /// When true, output callback emits silence and freezes playback_pos.
     pub is_paused: Arc<AtomicBool>,
+    /// When true, the primary output callback captures the mix into session_mix_buf
+    /// and the input callback captures live audio into session_input_buf.
+    pub is_session_recording: Arc<AtomicBool>,
+    /// Loop mix samples captured during session recording (interleaved f32).
+    pub session_mix_buf: Arc<Mutex<Vec<f32>>>,
+    /// Live input samples captured during session recording (interleaved f32).
+    pub session_input_buf: Arc<Mutex<Vec<f32>>>,
     pub cmd_tx: std::sync::mpsc::SyncSender<LooperCmd>,
     pub thread_join: Option<std::thread::JoinHandle<()>>,
 }
@@ -108,31 +113,44 @@ pub fn start_looper_thread(
     output_device_indices: Vec<usize>,
     app_handle: AppHandle,
 ) -> Result<LooperEngine, String> {
-    let shared = Arc::new(Mutex::new(LooperShared::new()));
+    let shared = Arc::new(RwLock::new(LooperShared::new()));
     let playback_pos = Arc::new(AtomicUsize::new(0));
-    let is_recording = Arc::new(AtomicBool::new(true)); // RecordingBase starts immediately
+    let is_recording = Arc::new(AtomicBool::new(false)); // starts false — arming first
+    let is_arming = Arc::new(AtomicBool::new(true));
     let is_paused = Arc::new(AtomicBool::new(false));
+    let is_session_recording = Arc::new(AtomicBool::new(false));
+    let session_mix_buf = Arc::new(Mutex::new(Vec::<f32>::new()));
+    let session_input_buf = Arc::new(Mutex::new(Vec::<f32>::new()));
 
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(0);
     let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel::<LooperCmd>(8);
 
-    let shared_t = Arc::clone(&shared);
-    let pos_t = Arc::clone(&playback_pos);
-    let rec_t = Arc::clone(&is_recording);
-    let pause_t = Arc::clone(&is_paused);
-
-    let join = std::thread::spawn(move || {
-        looper_thread_main(
-            input_device_index,
-            output_device_indices,
-            app_handle,
-            shared_t,
-            pos_t,
-            rec_t,
-            pause_t,
-            ready_tx,
-            cmd_rx,
-        );
+    let join = std::thread::spawn({
+        let shared = Arc::clone(&shared);
+        let playback_pos = Arc::clone(&playback_pos);
+        let is_recording = Arc::clone(&is_recording);
+        let is_arming = Arc::clone(&is_arming);
+        let is_paused = Arc::clone(&is_paused);
+        let is_session_recording = Arc::clone(&is_session_recording);
+        let session_mix_buf = Arc::clone(&session_mix_buf);
+        let session_input_buf = Arc::clone(&session_input_buf);
+        move || {
+            looper_thread_main(
+                input_device_index,
+                output_device_indices,
+                app_handle,
+                shared,
+                playback_pos,
+                is_recording,
+                is_arming,
+                is_paused,
+                is_session_recording,
+                session_mix_buf,
+                session_input_buf,
+                ready_tx,
+                cmd_rx,
+            );
+        }
     });
 
     match ready_rx.recv() {
@@ -140,7 +158,11 @@ pub fn start_looper_thread(
             shared,
             playback_pos,
             is_recording,
+            is_arming,
             is_paused,
+            is_session_recording,
+            session_mix_buf,
+            session_input_buf,
             cmd_tx,
             thread_join: Some(join),
         }),
@@ -158,10 +180,14 @@ fn looper_thread_main(
     input_device_index: usize,
     output_device_indices: Vec<usize>,
     app_handle: AppHandle,
-    shared: Arc<Mutex<LooperShared>>,
+    shared: Arc<RwLock<LooperShared>>,
     playback_pos: Arc<AtomicUsize>,
     is_recording: Arc<AtomicBool>,
+    is_arming: Arc<AtomicBool>,
     is_paused: Arc<AtomicBool>,
+    is_session_recording: Arc<AtomicBool>,
+    session_mix_buf: Arc<Mutex<Vec<f32>>>,
+    session_input_buf: Arc<Mutex<Vec<f32>>>,
     ready_tx: std::sync::mpsc::SyncSender<Result<(), String>>,
     cmd_rx: std::sync::mpsc::Receiver<LooperCmd>,
 ) {
@@ -188,7 +214,7 @@ fn looper_thread_main(
 
     // Write sample_rate/channels into shared now that we know them.
     {
-        let mut g = shared.lock().unwrap();
+        let mut g = shared.write().unwrap();
         g.sample_rate = sample_rate;
         g.channels = channels;
     }
@@ -200,57 +226,84 @@ fn looper_thread_main(
     };
 
     // --- Build input stream ---
-    let shared_in = Arc::clone(&shared);
-    let rec_flag = Arc::clone(&is_recording);
-    let app_in = app_handle.clone();
     let in_cfg = input_cfg.config();
     let in_fmt = input_cfg.sample_format();
 
-    let input_stream = match in_fmt {
-        cpal::SampleFormat::F32 => input_device.build_input_stream(
-            &in_cfg,
-            move |data: &[f32], _| {
-                let rms = rms_f32(data);
-                let _ = app_in.emit("audio-level", AudioLevelPayload { rms });
-                if let Ok(mut g) = shared_in.try_lock() {
-                    if rec_flag.load(Ordering::Relaxed) {
-                        g.recording_buf.extend_from_slice(data);
-                    }
-                    if g.is_session_recording && g.status != LooperStatus::Paused {
-                        g.session_input_buf.extend_from_slice(data);
+    // Macro-like helper: build the input callback body given typed data.
+    // Captures: shared_in (RwLock), rec_flag, arming_flag, is_session_rec, is_paused_in, session_input.
+    macro_rules! make_input_cb {
+        ($shared_in:expr, $rec_flag:expr, $arming_flag:expr, $is_sr:expr, $is_paused_in:expr, $session_in:expr, $data:expr) => {{
+            let rms = rms_f32($data);
+            let _ = app_handle.clone().emit("audio-level", AudioLevelPayload { rms });
+
+            if $arming_flag.load(Ordering::Relaxed) {
+                // Armed: wait for first sound above threshold (~-40 dBFS) before recording.
+                if rms > 0.01 {
+                    $arming_flag.store(false, Ordering::SeqCst);
+                    $rec_flag.store(true, Ordering::SeqCst);
+                    if let Ok(mut g) = $shared_in.try_write() {
+                        g.status = LooperStatus::RecordingBase;
+                        g.recording_buf.extend_from_slice($data);
                     }
                 }
-            },
-            |e| eprintln!("[Looper] input error: {e}"),
-            None,
-        ),
+                // else: below threshold — discard (silence)
+            } else if $rec_flag.load(Ordering::Relaxed) {
+                // recording_buf is written during base record / overdub — needs exclusive access.
+                if let Ok(mut g) = $shared_in.try_write() {
+                    g.recording_buf.extend_from_slice($data);
+                }
+            }
+
+            // Session input capture — separate mutex, no RwLock needed.
+            if $is_sr.load(Ordering::Relaxed) && !$is_paused_in.load(Ordering::Relaxed) {
+                if let Ok(mut buf) = $session_in.try_lock() {
+                    buf.extend_from_slice($data);
+                }
+            }
+        }};
+    }
+
+    let input_stream = match in_fmt {
+        cpal::SampleFormat::F32 => {
+            let shared_in = Arc::clone(&shared);
+            let rec_flag = Arc::clone(&is_recording);
+            let arming_flag = Arc::clone(&is_arming);
+            let is_sr = Arc::clone(&is_session_recording);
+            let is_paused_in = Arc::clone(&is_paused);
+            let session_in = Arc::clone(&session_input_buf);
+            input_device.build_input_stream(
+                &in_cfg,
+                move |data: &[f32], _| {
+                    make_input_cb!(shared_in, rec_flag, arming_flag, is_sr, is_paused_in, session_in, data);
+                },
+                |e| eprintln!("[Looper] input error: {e}"),
+                None,
+            )
+        }
         cpal::SampleFormat::I16 => {
-            let shared_in2 = Arc::clone(&shared);
-            let rec_flag2 = Arc::clone(&is_recording);
-            let app_in2 = app_handle.clone();
+            let shared_in = Arc::clone(&shared);
+            let rec_flag = Arc::clone(&is_recording);
+            let arming_flag = Arc::clone(&is_arming);
+            let is_sr = Arc::clone(&is_session_recording);
+            let is_paused_in = Arc::clone(&is_paused);
+            let session_in = Arc::clone(&session_input_buf);
             input_device.build_input_stream(
                 &in_cfg,
                 move |data: &[i16], _| {
                     let f32s: Vec<f32> = data.iter().map(|&s| s as f32 / 32767.0).collect();
-                    let rms = rms_f32(&f32s);
-                    let _ = app_in2.emit("audio-level", AudioLevelPayload { rms });
-                    if let Ok(mut g) = shared_in2.try_lock() {
-                        if rec_flag2.load(Ordering::Relaxed) {
-                            g.recording_buf.extend_from_slice(&f32s);
-                        }
-                        if g.is_session_recording && g.status != LooperStatus::Paused {
-                            g.session_input_buf.extend_from_slice(&f32s);
-                        }
-                    }
+                    make_input_cb!(shared_in, rec_flag, arming_flag, is_sr, is_paused_in, session_in, &f32s);
                 },
                 |e| eprintln!("[Looper] input error: {e}"),
                 None,
             )
         }
         cpal::SampleFormat::U16 => {
-            let shared_in3 = Arc::clone(&shared);
-            let rec_flag3 = Arc::clone(&is_recording);
-            let app_in3 = app_handle.clone();
+            let shared_in = Arc::clone(&shared);
+            let rec_flag = Arc::clone(&is_recording);
+            let arming_flag = Arc::clone(&is_arming);
+            let is_sr = Arc::clone(&is_session_recording);
+            let is_paused_in = Arc::clone(&is_paused);
+            let session_in = Arc::clone(&session_input_buf);
             input_device.build_input_stream(
                 &in_cfg,
                 move |data: &[u16], _| {
@@ -258,16 +311,7 @@ fn looper_thread_main(
                         .iter()
                         .map(|&s| (s.wrapping_sub(32768) as i16) as f32 / 32767.0)
                         .collect();
-                    let rms = rms_f32(&f32s);
-                    let _ = app_in3.emit("audio-level", AudioLevelPayload { rms });
-                    if let Ok(mut g) = shared_in3.try_lock() {
-                        if rec_flag3.load(Ordering::Relaxed) {
-                            g.recording_buf.extend_from_slice(&f32s);
-                        }
-                        if g.is_session_recording && g.status != LooperStatus::Paused {
-                            g.session_input_buf.extend_from_slice(&f32s);
-                        }
-                    }
+                    make_input_cb!(shared_in, rec_flag, arming_flag, is_sr, is_paused_in, session_in, &f32s);
                 },
                 |e| eprintln!("[Looper] input error: {e}"),
                 None,
@@ -291,7 +335,11 @@ fn looper_thread_main(
     // --- Build output streams ---
     let mut output_streams: Vec<cpal::Stream> = Vec::new();
 
-    for &out_idx in &output_device_indices {
+    for (stream_idx, &out_idx) in output_device_indices.iter().enumerate() {
+        // Only the first stream advances playback_pos and captures the session mix.
+        // Without this, N streams advance pos N times per buffer → plays at N× speed.
+        let is_primary = stream_idx == 0;
+
         let out_device = match output_devices_all.iter().nth(out_idx) {
             Some(d) => d,
             None => { eprintln!("[Looper] output device {} not found", out_idx); continue; }
@@ -305,11 +353,10 @@ fn looper_thread_main(
         let shared_out = Arc::clone(&shared);
         let pos_out = Arc::clone(&playback_pos);
         let paused_out = Arc::clone(&is_paused);
+        let is_sr_out = Arc::clone(&is_session_recording);
+        let smb_out = Arc::clone(&session_mix_buf);
 
-        // Always use the input device's sample rate for output so that
-        // playback_pos advances at the same rate the audio was recorded.
-        // Most devices support both 44100 and 48000 Hz; if not, we fall back
-        // to the device default and log a warning.
+        // Force output to use the input device's sample rate to prevent speed/pitch shift.
         let desired_rate = cpal::SampleRate(sample_rate);
         let rate_ok = out_device
             .supported_output_configs()
@@ -343,7 +390,8 @@ fn looper_thread_main(
             cpal::SampleFormat::F32 => out_device.build_output_stream(
                 &stream_cfg,
                 move |data: &mut [f32], _| {
-                    mix_into_output(data, &shared_out, &pos_out, &paused_out, out_channels);
+                    mix_into_output(data, &shared_out, &pos_out, &paused_out,
+                                    &is_sr_out, &smb_out, out_channels, is_primary);
                 },
                 |e| eprintln!("[Looper] output error: {e}"),
                 None,
@@ -352,11 +400,14 @@ fn looper_thread_main(
                 let shared_out2 = Arc::clone(&shared);
                 let pos_out2 = Arc::clone(&playback_pos);
                 let paused_out2 = Arc::clone(&is_paused);
+                let is_sr_out2 = Arc::clone(&is_session_recording);
+                let smb_out2 = Arc::clone(&session_mix_buf);
                 out_device.build_output_stream(
                     &stream_cfg,
                     move |data: &mut [i16], _| {
                         let mut tmp = vec![0.0f32; data.len()];
-                        mix_into_output(&mut tmp, &shared_out2, &pos_out2, &paused_out2, out_channels);
+                        mix_into_output(&mut tmp, &shared_out2, &pos_out2, &paused_out2,
+                                        &is_sr_out2, &smb_out2, out_channels, is_primary);
                         for (o, s) in data.iter_mut().zip(tmp.iter()) {
                             *o = (s * 32767.0) as i16;
                         }
@@ -392,7 +443,7 @@ fn looper_thread_main(
         match cmd {
             LooperCmd::StartLoop => {
                 is_recording.store(false, Ordering::SeqCst);
-                let mut g = shared.lock().unwrap();
+                let mut g = shared.write().unwrap();
                 let ch = g.channels as usize;
                 let frames = if ch > 0 { g.recording_buf.len() / ch } else { 0 };
                 if frames == 0 {
@@ -413,7 +464,7 @@ fn looper_thread_main(
             LooperCmd::StartOverdub => {
                 // Mark as waiting immediately so the frontend can show feedback.
                 let (loop_frames, sr) = {
-                    let mut g = shared.lock().unwrap();
+                    let mut g = shared.write().unwrap();
                     g.status = LooperStatus::WaitingForOverdub;
                     (g.loop_length_frames, g.sample_rate as usize)
                 };
@@ -429,7 +480,7 @@ fn looper_thread_main(
                 }
 
                 {
-                    let mut g = shared.lock().unwrap();
+                    let mut g = shared.write().unwrap();
                     g.recording_buf.clear();
                     g.status = LooperStatus::Overdubbing;
                 }
@@ -438,7 +489,7 @@ fn looper_thread_main(
 
             LooperCmd::StopOverdub { offset_ms } => {
                 is_recording.store(false, Ordering::SeqCst);
-                let mut g = shared.lock().unwrap();
+                let mut g = shared.write().unwrap();
                 let ch = g.channels as usize;
                 let target_len = g.loop_length_frames * ch;
 
@@ -454,18 +505,12 @@ fn looper_thread_main(
                     let offset_samples = (offset_frames * ch).min(target_len);
 
                     if offset_ms > 0 {
-                        // Shift forward: layer plays later → silence at start
                         g.recording_buf.rotate_right(offset_samples);
-                        for s in &mut g.recording_buf[..offset_samples] {
-                            *s = 0.0;
-                        }
+                        for s in &mut g.recording_buf[..offset_samples] { *s = 0.0; }
                     } else {
-                        // Shift backward: layer plays earlier → silence at end
                         g.recording_buf.rotate_left(offset_samples);
                         let end = target_len - offset_samples;
-                        for s in &mut g.recording_buf[end..] {
-                            *s = 0.0;
-                        }
+                        for s in &mut g.recording_buf[end..] { *s = 0.0; }
                     }
                 }
 
@@ -479,7 +524,7 @@ fn looper_thread_main(
             LooperCmd::StopAll => {
                 is_recording.store(false, Ordering::SeqCst);
                 {
-                    let mut g = shared.lock().unwrap();
+                    let mut g = shared.write().unwrap();
                     g.status = LooperStatus::Idle;
                     g.layers.clear();
                     g.recording_buf.clear();
@@ -498,19 +543,25 @@ fn looper_thread_main(
 // Output mix callback — called from the cpal output stream thread
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn mix_into_output(
     data: &mut [f32],
-    shared: &Arc<Mutex<LooperShared>>,
+    shared: &Arc<RwLock<LooperShared>>,
     playback_pos: &Arc<AtomicUsize>,
     is_paused: &Arc<AtomicBool>,
+    is_session_recording: &Arc<AtomicBool>,
+    session_mix_buf: &Arc<Mutex<Vec<f32>>>,
     out_channels: usize,
+    advance_pos: bool,
 ) {
     if is_paused.load(Ordering::Relaxed) {
         data.fill(0.0);
         return;
     }
 
-    let mut g = match shared.try_lock() {
+    // try_read allows multiple output callbacks to run truly concurrently —
+    // no blocking between streams. Only fails briefly during command-handler writes.
+    let g = match shared.try_read() {
         Ok(g) => g,
         Err(_) => { data.fill(0.0); return; }
     };
@@ -525,10 +576,13 @@ fn mix_into_output(
     let pos = playback_pos.load(Ordering::Relaxed);
     let frame_count = data.len() / out_channels;
 
+    // Only the primary stream captures session mix (advance_pos == is_primary).
+    let capture_session = advance_pos && is_session_recording.load(Ordering::Relaxed);
+    let mut smb = if capture_session { session_mix_buf.try_lock().ok() } else { None };
+
     for f in 0..frame_count {
         let loop_frame = (pos + f) % loop_frames;
 
-        // Mix all unmuted layers at this position, compute per-input-channel mix
         let mut mix = vec![0.0f32; layer_ch.max(1)];
         for layer in &g.layers {
             if layer.muted { continue; }
@@ -540,22 +594,23 @@ fn mix_into_output(
             }
         }
 
-        // Session recording: capture the loop mix at its native channel count.
-        if g.is_session_recording {
+        // Session recording: capture loop mix at native channel count.
+        if let Some(ref mut buf) = smb {
             for &s in &mix {
-                g.session_recording_buf.push(s.clamp(-1.0, 1.0));
+                buf.push(s.clamp(-1.0, 1.0));
             }
         }
 
-        // Write to output buffer, handling channel count mismatch
         for c in 0..out_channels {
             let src = if layer_ch > 0 { mix[c.min(layer_ch - 1)].clamp(-1.0, 1.0) } else { 0.0 };
             data[f * out_channels + c] = src;
         }
     }
 
-    let new_pos = (pos + frame_count) % loop_frames;
-    playback_pos.store(new_pos, Ordering::Relaxed);
+    if advance_pos {
+        let new_pos = (pos + frame_count) % loop_frames;
+        playback_pos.store(new_pos, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------

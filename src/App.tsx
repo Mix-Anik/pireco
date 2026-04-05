@@ -47,20 +47,29 @@ export default function App() {
     return () => clearInterval(timerRef.current);
   }, [state.status]);
 
-  // Space bar: toggle record / stop (recorder tab only)
+  // Space bar: toggle record / stop
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (activeTab !== 'recorder') return;
       if (e.code !== 'Space') return;
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
       e.preventDefault();
-      if (state.status === 'Recording') stop();
-      else if (state.status === 'Idle') record();
+
+      if (activeTab === 'recorder') {
+        if (state.status === 'Recording') stop();
+        else if (state.status === 'Idle') record();
+      } else {
+        const ls = looper.state.status;
+        if (ls === 'Idle') looper.startRecord();
+        else if (ls === 'Arming') looper.stopAll();      // cancel arming
+        else if (ls === 'RecordingBase') looper.stopAndLoop();
+        else if (ls === 'Looping') looper.startOverdub();
+        else if (ls === 'Overdubbing') looper.stopOverdub();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [activeTab, state.status, record, stop]);
+  }, [activeTab, state.status, record, stop, looper]);
 
   // Auto-dismiss recorder error after 6 seconds
   useEffect(() => {

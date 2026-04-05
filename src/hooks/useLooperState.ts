@@ -86,6 +86,7 @@ export function useLooperState() {
     if (pollRef.current) return;
     pollRef.current = setInterval(async () => {
       if (
+        statusRef.current !== 'Arming' &&
         statusRef.current !== 'Looping' &&
         statusRef.current !== 'WaitingForOverdub' &&
         statusRef.current !== 'Overdubbing'
@@ -115,6 +116,7 @@ export function useLooperState() {
   // Start/stop polling based on status
   useEffect(() => {
     if (
+      state.status === 'Arming' ||
       state.status === 'Looping' ||
       state.status === 'WaitingForOverdub' ||
       state.status === 'Overdubbing'
@@ -162,7 +164,7 @@ export function useLooperState() {
       dispatch({
         type: 'SNAPSHOT',
         snapshot: {
-          status: 'RecordingBase',
+          status: 'Arming',
           layers: [],
           loop_duration_ms: 0,
           playback_pos_ms: 0,

@@ -907,6 +907,31 @@ html, body, #root {
   color: var(--accent);
 }
 
+/* ── Arming indicator (waiting for first sound) ──────────────── */
+.arming-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: rgba(0, 212, 200, 0.06);
+  border: 1px solid rgba(0, 212, 200, 0.22);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+  animation: pulse-overdub-wait 0.6s ease-in-out infinite alternate;
+}
+
+.arming-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  flex-shrink: 0;
+}
+
 /* ── Overdub waiting indicator ───────────────────────────────── */
 .overdub-waiting {
   display: flex;
