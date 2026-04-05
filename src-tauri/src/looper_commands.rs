@@ -1,4 +1,5 @@
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
+use hound;
 
 use crate::{
     looper::{downsample_layer, start_looper_thread, LooperCmd, LooperStatus},
@@ -23,6 +24,7 @@ pub struct LooperStateSnapshot {
     pub loop_duration_ms: u32,
     pub playback_pos_ms: u32,
     pub sample_rate: u32,
+    pub is_session_recording: bool,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -44,6 +46,7 @@ fn build_snapshot(state: &State<'_, AppState>) -> LooperStateSnapshot {
             loop_duration_ms: 0,
             playback_pos_ms: 0,
             sample_rate: 0,
+            is_session_recording: false,
         },
         Some(engine) => {
             let shared = engine.shared.lock().unwrap();
@@ -66,6 +69,7 @@ fn build_snapshot(state: &State<'_, AppState>) -> LooperStateSnapshot {
                 loop_duration_ms: loop_ms,
                 playback_pos_ms: pos_ms,
                 sample_rate: shared.sample_rate,
+                is_session_recording: shared.is_session_recording,
             }
         }
     }
@@ -218,6 +222,98 @@ pub fn looper_resume(state: State<'_, AppState>) -> Result<LooperStateSnapshot, 
     engine.is_paused.store(false, std::sync::atomic::Ordering::SeqCst);
     drop(guard);
     Ok(build_snapshot(&state))
+}
+
+/// Begin capturing loop output mix + live input into session buffers.
+#[tauri::command]
+pub fn looper_start_session_record(state: State<'_, AppState>) -> Result<LooperStateSnapshot, String> {
+    let guard = state.looper.lock().unwrap();
+    let engine = guard.as_ref().ok_or("Looper is not running")?;
+    let mut shared = engine.shared.lock().unwrap();
+    shared.session_recording_buf.clear();
+    shared.session_input_buf.clear();
+    shared.is_session_recording = true;
+    drop(shared);
+    drop(guard);
+    Ok(build_snapshot(&state))
+}
+
+/// Stop session recording and write a temp WAV (loop mix + live input).
+#[tauri::command]
+pub fn looper_stop_session_record(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<LooperStateSnapshot, String> {
+    let (mix_buf, input_buf, channels, sample_rate) = {
+        let guard = state.looper.lock().unwrap();
+        let engine = guard.as_ref().ok_or("Looper is not running")?;
+        let mut shared = engine.shared.lock().unwrap();
+        shared.is_session_recording = false;
+        (
+            std::mem::take(&mut shared.session_recording_buf),
+            std::mem::take(&mut shared.session_input_buf),
+            shared.channels,
+            shared.sample_rate,
+        )
+    };
+
+    // Mix loop output + live input sample by sample; use shorter length to stay aligned.
+    let len = mix_buf.len().min(input_buf.len());
+    let mut final_buf: Vec<f32> = (0..len)
+        .map(|i| (mix_buf[i] + input_buf[i]).clamp(-1.0, 1.0))
+        .collect();
+
+    // If one buffer ran longer (e.g. a small timing difference), append the tail.
+    if mix_buf.len() > len {
+        final_buf.extend(mix_buf[len..].iter().map(|&s| s.clamp(-1.0, 1.0)));
+    } else if input_buf.len() > len {
+        final_buf.extend(input_buf[len..].iter().map(|&s| s.clamp(-1.0, 1.0)));
+    }
+
+    // Write to a temp WAV file in app data dir.
+    let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&data_dir).map_err(|e| e.to_string())?;
+    let wav_path = data_dir.join("session_recording.wav");
+
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::create(&wav_path, spec).map_err(|e| e.to_string())?;
+    for sample in &final_buf {
+        writer.write_sample(*sample).map_err(|e| e.to_string())?;
+    }
+    writer.finalize().map_err(|e| e.to_string())?;
+
+    *state.temp_session_wav.lock().unwrap() = Some(wav_path);
+
+    Ok(build_snapshot(&state))
+}
+
+/// Open a save dialog and copy the temp session WAV to the user-chosen path.
+#[tauri::command]
+pub fn looper_save_session(
+    state: State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let src = state.temp_session_wav.lock().unwrap().clone()
+        .ok_or("No session recording available to save")?;
+
+    let dest = app_handle
+        .dialog()
+        .file()
+        .add_filter("WAV Audio", &["wav"])
+        .set_file_name("session.wav")
+        .blocking_save_file()
+        .ok_or("Save cancelled")?;
+
+    let dest_path = dest.as_path().ok_or("Invalid destination path")?;
+    std::fs::copy(&src, dest_path).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Read-only state snapshot — called by the frontend polling interval.

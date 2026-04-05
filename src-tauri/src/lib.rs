@@ -13,8 +13,9 @@ use commands::{
 };
 use looper_commands::{
     get_audio_output_devices, looper_delete_layer, looper_get_layer_waveform, looper_get_state,
-    looper_pause, looper_resume, looper_start_overdub, looper_start_record, looper_stop_all,
-    looper_stop_and_loop, looper_stop_overdub, looper_toggle_mute_layer,
+    looper_pause, looper_resume, looper_save_session, looper_start_overdub, looper_start_record,
+    looper_start_session_record, looper_stop_all, looper_stop_and_loop, looper_stop_overdub,
+    looper_stop_session_record, looper_toggle_mute_layer,
 };
 use state::AppState;
 
@@ -44,6 +45,9 @@ pub fn run() {
             looper_get_layer_waveform,
             looper_pause,
             looper_resume,
+            looper_start_session_record,
+            looper_stop_session_record,
+            looper_save_session,
             get_audio_output_devices,
         ])
         .run(tauri::generate_context!())

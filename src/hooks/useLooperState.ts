@@ -12,6 +12,7 @@ interface State {
   loopDurationMs: number;
   playbackPosMs: number;
   sampleRate: number;
+  isSessionRecording: boolean;
   selectedInputDevice: number | null;
   selectedOutputDevices: number[];
   overdubOffsetMs: number;
@@ -34,6 +35,7 @@ function applySnapshot(state: State, snapshot: LooperStateSnapshot): State {
     loopDurationMs: snapshot.loop_duration_ms,
     playbackPosMs: snapshot.playback_pos_ms,
     sampleRate: snapshot.sample_rate,
+    isSessionRecording: snapshot.is_session_recording,
   };
 }
 
@@ -64,6 +66,7 @@ function loadInitialState(): State {
     loopDurationMs: 0,
     playbackPosMs: 0,
     sampleRate: 0,
+    isSessionRecording: false,
     selectedInputDevice: null,
     selectedOutputDevices: [],
     overdubOffsetMs: savedOffset !== null ? Number(savedOffset) : 0,
@@ -164,6 +167,7 @@ export function useLooperState() {
           loop_duration_ms: 0,
           playback_pos_ms: 0,
           sample_rate: state.sampleRate,
+          is_session_recording: false,
         },
       });
     } catch (err) {
@@ -212,6 +216,7 @@ export function useLooperState() {
           loop_duration_ms: 0,
           playback_pos_ms: 0,
           sample_rate: 0,
+          is_session_recording: false,
         },
       });
     } catch (err) {
@@ -259,6 +264,29 @@ export function useLooperState() {
     }
   }, []);
 
+  const startSessionRecord = useCallback(async () => {
+    try {
+      const snapshot = await invoke<LooperStateSnapshot>('looper_start_session_record');
+      dispatch({ type: 'SNAPSHOT', snapshot });
+    } catch (err) {
+      dispatch({ type: 'SET_ERROR', error: String(err) });
+    }
+  }, []);
+
+  const stopAndSaveSession = useCallback(async () => {
+    try {
+      const snapshot = await invoke<LooperStateSnapshot>('looper_stop_session_record');
+      dispatch({ type: 'SNAPSHOT', snapshot });
+      // Opens a blocking save dialog on the Rust side — resolves when user picks a file or cancels.
+      await invoke('looper_save_session');
+    } catch (err) {
+      // "Save cancelled" is not an error worth showing.
+      if (!String(err).includes('cancelled')) {
+        dispatch({ type: 'SET_ERROR', error: String(err) });
+      }
+    }
+  }, []);
+
   const clearError = useCallback(() => {
     dispatch({ type: 'CLEAR_ERROR' });
   }, []);
@@ -275,6 +303,8 @@ export function useLooperState() {
     stopAll,
     pause,
     resume,
+    startSessionRecord,
+    stopAndSaveSession,
     toggleMute,
     deleteLayer,
     clearError,

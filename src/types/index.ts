@@ -51,6 +51,7 @@ export interface LooperStateSnapshot {
   loop_duration_ms: number;
   playback_pos_ms: number;
   sample_rate: number;
+  is_session_recording: boolean;
 }
 
 export interface AudioOutputDevice {

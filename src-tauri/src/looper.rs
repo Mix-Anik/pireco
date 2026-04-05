@@ -40,11 +40,13 @@ pub struct LooperShared {
     /// Accumulates raw f32 samples during RecordingBase / Overdubbing.
     pub recording_buf: Vec<f32>,
     pub status: LooperStatus,
-    // Hooks for future session recording — zero cost until enabled.
-    #[allow(dead_code)]
-    pub session_recording_buf: Vec<f32>,
-    #[allow(dead_code)]
+    /// When true, the output callback appends the loop mix to session_recording_buf
+    /// and the input callback appends live audio to session_input_buf.
     pub is_session_recording: bool,
+    /// Loop mix samples captured during a session recording (interleaved f32).
+    pub session_recording_buf: Vec<f32>,
+    /// Live input samples captured during a session recording (interleaved f32).
+    pub session_input_buf: Vec<f32>,
 }
 
 impl LooperShared {
@@ -57,8 +59,9 @@ impl LooperShared {
             next_layer_id: 0,
             recording_buf: Vec::new(),
             status: LooperStatus::RecordingBase,
-            session_recording_buf: Vec::new(),
             is_session_recording: false,
+            session_recording_buf: Vec::new(),
+            session_input_buf: Vec::new(),
         }
     }
 }
@@ -209,9 +212,12 @@ fn looper_thread_main(
             move |data: &[f32], _| {
                 let rms = rms_f32(data);
                 let _ = app_in.emit("audio-level", AudioLevelPayload { rms });
-                if rec_flag.load(Ordering::Relaxed) {
-                    if let Ok(mut g) = shared_in.try_lock() {
+                if let Ok(mut g) = shared_in.try_lock() {
+                    if rec_flag.load(Ordering::Relaxed) {
                         g.recording_buf.extend_from_slice(data);
+                    }
+                    if g.is_session_recording && g.status != LooperStatus::Paused {
+                        g.session_input_buf.extend_from_slice(data);
                     }
                 }
             },
@@ -228,9 +234,12 @@ fn looper_thread_main(
                     let f32s: Vec<f32> = data.iter().map(|&s| s as f32 / 32767.0).collect();
                     let rms = rms_f32(&f32s);
                     let _ = app_in2.emit("audio-level", AudioLevelPayload { rms });
-                    if rec_flag2.load(Ordering::Relaxed) {
-                        if let Ok(mut g) = shared_in2.try_lock() {
+                    if let Ok(mut g) = shared_in2.try_lock() {
+                        if rec_flag2.load(Ordering::Relaxed) {
                             g.recording_buf.extend_from_slice(&f32s);
+                        }
+                        if g.is_session_recording && g.status != LooperStatus::Paused {
+                            g.session_input_buf.extend_from_slice(&f32s);
                         }
                     }
                 },
@@ -251,9 +260,12 @@ fn looper_thread_main(
                         .collect();
                     let rms = rms_f32(&f32s);
                     let _ = app_in3.emit("audio-level", AudioLevelPayload { rms });
-                    if rec_flag3.load(Ordering::Relaxed) {
-                        if let Ok(mut g) = shared_in3.try_lock() {
+                    if let Ok(mut g) = shared_in3.try_lock() {
+                        if rec_flag3.load(Ordering::Relaxed) {
                             g.recording_buf.extend_from_slice(&f32s);
+                        }
+                        if g.is_session_recording && g.status != LooperStatus::Paused {
+                            g.session_input_buf.extend_from_slice(&f32s);
                         }
                     }
                 },
@@ -498,7 +510,7 @@ fn mix_into_output(
         return;
     }
 
-    let g = match shared.try_lock() {
+    let mut g = match shared.try_lock() {
         Ok(g) => g,
         Err(_) => { data.fill(0.0); return; }
     };
@@ -528,8 +540,12 @@ fn mix_into_output(
             }
         }
 
-        // Future session recording hook: named mix values are available here.
-        // if g.is_session_recording { push mix to g.session_recording_buf ... }
+        // Session recording: capture the loop mix at its native channel count.
+        if g.is_session_recording {
+            for &s in &mix {
+                g.session_recording_buf.push(s.clamp(-1.0, 1.0));
+            }
+        }
 
         // Write to output buffer, handling channel count mismatch
         for c in 0..out_channels {

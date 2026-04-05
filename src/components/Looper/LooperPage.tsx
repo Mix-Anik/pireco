@@ -45,6 +45,9 @@ export function LooperPage({ looper }: Props) {
           onStopAll={looper.stopAll}
           onPause={looper.pause}
           onResume={looper.resume}
+          isSessionRecording={state.isSessionRecording}
+          onStartSessionRecord={looper.startSessionRecord}
+          onStopAndSaveSession={looper.stopAndSaveSession}
         />
       </aside>
 

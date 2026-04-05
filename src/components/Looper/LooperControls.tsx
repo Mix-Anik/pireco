@@ -12,6 +12,9 @@ interface Props {
   onStopAll: () => void;
   onPause: () => void;
   onResume: () => void;
+  isSessionRecording: boolean;
+  onStartSessionRecord: () => void;
+  onStopAndSaveSession: () => void;
 }
 
 export function LooperControls({
@@ -25,6 +28,9 @@ export function LooperControls({
   onStopAll,
   onPause,
   onResume,
+  isSessionRecording,
+  onStartSessionRecord,
+  onStopAndSaveSession,
 }: Props) {
   const isIdle = status === 'Idle';
   const isRecordingBase = status === 'RecordingBase';
@@ -135,6 +141,32 @@ export function LooperControls({
               >
                 <span className="transport-btn-icon">⏹</span>
                 Done
+              </button>
+            )}
+          </>
+        )}
+
+        {/* Session recording — available while loop is playing */}
+        {(isLooping || isPaused || isWaiting || isOverdubbing) && (
+          <>
+            <div className="transport-divider" />
+            {!isSessionRecording ? (
+              <button
+                className="transport-btn record"
+                onClick={onStartSessionRecord}
+                title="Record loop + live input to a WAV file"
+              >
+                <span className="transport-btn-icon">⏺</span>
+                Record Mix
+              </button>
+            ) : (
+              <button
+                className="transport-btn record active session-rec-active"
+                onClick={onStopAndSaveSession}
+                title="Stop recording and save to file"
+              >
+                <span className="transport-btn-icon">⏹</span>
+                Stop & Save
               </button>
             )}
           </>

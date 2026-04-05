@@ -56,6 +56,7 @@ impl RecordingSession {
 pub struct AppState {
     pub session: Mutex<RecordingSession>,
     pub looper: Mutex<Option<crate::looper::LooperEngine>>,
+    pub temp_session_wav: Mutex<Option<std::path::PathBuf>>,
 }
 
 impl AppState {
@@ -63,6 +64,7 @@ impl AppState {
         AppState {
             session: Mutex::new(RecordingSession::new()),
             looper: Mutex::new(None),
+            temp_session_wav: Mutex::new(None),
         }
     }
 }
